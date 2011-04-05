@@ -4,7 +4,7 @@ use warnings;
 use strict;
 use Carp;
 
-use version; our $VERSION = qv('0.0.2');
+use version; our $VERSION = qv('0.0.6');
 
 # Other recommended modules (uncomment to use):
 #  use IO::Prompt;
@@ -12,9 +12,13 @@ use version; our $VERSION = qv('0.0.2');
 #  use Perl6::Slurp;
 #  use Perl6::Say;
 use Encode;
+use Encode::Alias;
+define_alias( qr/shift.*jis$/i  => '"cp932"' );
+define_alias( qr/sjis$/i        => '"cp932"' );
 use WWW::Mechanize;
 use Web::Scraper;
 use YAML;
+use utf8;
 
 
 # Module implementation here
@@ -27,7 +31,7 @@ sub new {
   $self->{start_url} = 'http://www2.nuis.co.jp/kzz80011.htm';
   $mech->agent_alias( 'Windows IE 6' );
   $self->{mech} = $mech;
-
+  $self->{user_agent} = __PACKAGE__;
   return bless $self, $class;
 }
  
@@ -66,41 +70,47 @@ sub _request {
 
   # Web::Scraper による解析
   my $s = scraper {
-    #process '//html/body/div[3]/div/div/div[2]/div/table',
     process '//div[3]/div/div/div[2]/div/table',
     'results[]' => scraper {
-      process '//tr[1]/td',
+      process q{//tr/th/font[text() =~ /お問合せ番号/]/../../td},
       number => 'TEXT',
-      process '//tr[7]/td',
+      process '//tr/th/font[text() =~ /日付/ and @size = 4]/../../td',
       date => [ 'TEXT', sub { s/\s//g; return $_; } ],
-      process '//tr[8]/td',
+      process '//tr/th/font[text() =~ /時間/ and @size = 4]/../../td',
       time => [ 'TEXT', sub { s/\s//g; return $_; } ],
-      process '//tr[11]/td',
+      process '//tr/th[@rowspan != 5]/font[text() =~ /状況/]/../../td',
       status => [ 'TEXT', sub { s/\s//g; return $_; } ],
-      process '//tr[3]/td' ,
+      process '//tr/th/font[text() =~ /個数/]/../../td',
       items => [ 'TEXT', sub { s/\s//g; return $_; } ],
-      process '//tr[9]/td' ,
+      process '//tr/th/font[text() =~ /取扱店名/ and @size = 4]/../../td',
       shop => [ 'TEXT', sub { s/\s//g; return $_; } ],
+      process '//tr[3]/td',
+      line3 => [ 'TEXT', sub { s/\s//g; return $_; } ],
+      process '//tr/th/font[text() =~ /日付/ and @size != 4]/../../td',
+      adate => [ 'TEXT', sub { s/\s//g; return $_; } ],
     },
   };
   my $res = $s->scrape( 
              $self->{mech}->content() 
             );
   # 得られた結果をリストで返す
-  
   my $res2 = [];
   foreach my $item ( @{$res->{results}} ) {
     my $item2 = {};
     foreach my $key ( keys %$item ) {
       $item2->{$key} = encode_utf8( $item->{$key} );
     }
+    # 状況が取得できない場合（番号間違いなど）、3行目を入れる
     unless ( $item2->{status} ) {
-      $item2->{status} = $item2->{items};
-      delete $item2->{items};
+      $item2->{status} = $item2->{line3};
     }
-    if ( ( exists $item2->{shop} ) && !( $item2->{status} =~ m/配達完了済/ ) ) {
-      $item2->{status} = "$item2->{shop} $item2->{status}";
+    delete $item2->{line3};
+    # 最新状況の日付が取得できない場合、荷物引受の日付けを入れる
+    unless ( $item2->{date} ) {
+      $item2->{date} = $item2->{adate};
     }
+    delete $item2->{adate};
+    $item2->{user_agent} = $self->{user_agent};
     push @$res2, $item2;
   }
   $res->{results} = $res2;
